@@ -244,21 +244,18 @@ export function listSessionsWithSummary(opts?: { from?: number; to?: number }): 
   `).all(...args) as SummaryBearingSession[];
 }
 
-export function getWeeklyDigest(weekStart: number) {
-  return getDb().prepare(`SELECT * FROM weekly_digests WHERE week_start = ?`).get(weekStart) as
-    { week_start: number; content: string; session_ids: string; generated_at: number; model: string } | undefined;
+// Weekly digest 는 사용자가 그때그때 생성하는 휘발성 산출물이라
+// 디스크에 영구 저장하지 않는다. 프로세스 메모리에만 들고 있다가
+// 서버 재시작하면 자동 폐기.
+type DigestRow = { week_start: number; content: string; session_ids: string; generated_at: number; model: string };
+const digestCache = new Map<number, DigestRow>();
+
+export function getWeeklyDigest(weekStart: number): DigestRow | undefined {
+  return digestCache.get(weekStart);
 }
 
-export function upsertWeeklyDigest(row: { week_start: number; content: string; session_ids: string; generated_at: number; model: string }): void {
-  getDb().prepare(`
-    INSERT INTO weekly_digests(week_start, content, session_ids, generated_at, model)
-    VALUES (@week_start, @content, @session_ids, @generated_at, @model)
-    ON CONFLICT(week_start) DO UPDATE SET
-      content = excluded.content,
-      session_ids = excluded.session_ids,
-      generated_at = excluded.generated_at,
-      model = excluded.model
-  `).run(row);
+export function upsertWeeklyDigest(row: DigestRow): void {
+  digestCache.set(row.week_start, row);
 }
 
 /**

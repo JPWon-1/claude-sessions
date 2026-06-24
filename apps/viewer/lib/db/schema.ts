@@ -65,12 +65,4 @@ CREATE TABLE IF NOT EXISTS index_meta (
   schema_version  INTEGER NOT NULL DEFAULT 1
 );
 INSERT OR IGNORE INTO index_meta(id) VALUES (1);
-
-CREATE TABLE IF NOT EXISTS weekly_digests (
-  week_start    INTEGER PRIMARY KEY,
-  content       TEXT NOT NULL,
-  session_ids   TEXT NOT NULL,
-  generated_at  INTEGER NOT NULL,
-  model         TEXT NOT NULL DEFAULT ''
-);
 `;
