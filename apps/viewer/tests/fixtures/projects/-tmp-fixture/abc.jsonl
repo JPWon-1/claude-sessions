@@ -1,0 +1,8 @@
+{"parentUuid":null,"isSidechain":false,"promptId":"p1","type":"user","message":{"role":"user","content":"add login"},"uuid":"u1","timestamp":"2026-04-26T01:00:00.000Z","userType":"human","entrypoint":"cli","cwd":"/tmp/fixture","sessionId":"sess-A","version":"1.0","gitBranch":"main"}
+{"parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"requestId":"r1","type":"assistant","uuid":"u2","timestamp":"2026-04-26T01:10:00.000Z","userType":"assistant","entrypoint":"cli","cwd":"/tmp/fixture","sessionId":"sess-A","version":"1.0","gitBranch":"main"}
+{"type":"file-history-snapshot","messageId":"u2","snapshot":{"files":["/tmp/fixture/login.ts"]},"isSnapshotUpdate":false}
+{"type":"last-prompt","leafUuid":"u2","sessionId":"sess-A"}
+{"parentUuid":null,"isSidechain":false,"promptId":"p2","type":"user","message":{"role":"user","content":"polish login"},"uuid":"v1","timestamp":"2026-04-26T03:00:00.000Z","userType":"human","entrypoint":"cli","cwd":"/tmp/fixture","sessionId":"sess-B","version":"1.0","gitBranch":"main"}
+{"type":"last-prompt","leafUuid":"v1","sessionId":"sess-B"}
+{"parentUuid":null,"isSidechain":false,"promptId":"p3","type":"user","message":{"role":"user","content":"new feature totally unrelated"},"uuid":"w1","timestamp":"2026-04-27T12:00:00.000Z","userType":"human","entrypoint":"cli","cwd":"/tmp/fixture","sessionId":"sess-C","version":"1.0","gitBranch":"main"}
+{"type":"last-prompt","leafUuid":"w1","sessionId":"sess-C"}

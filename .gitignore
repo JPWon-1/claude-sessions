@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+.next/
+out/
+dist/
+*.tsbuildinfo
+
+# Databases (large + machine-local)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Playwright snapshots (transient)
+.playwright-mcp/
+.state/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/

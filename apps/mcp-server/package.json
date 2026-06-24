@@ -1,0 +1,22 @@
+{
+  "name": "claude-sessions-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "claude-sessions-mcp": "src/server.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "register": "claude mcp add claude-sessions -- tsx $(pwd)/src/server.ts",
+    "unregister": "claude mcp remove claude-sessions"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "20.16.0",
+    "tsx": "4.19.1",
+    "typescript": "5.6.3"
+  }
+}

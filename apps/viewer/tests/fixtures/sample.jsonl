@@ -1,0 +1,7 @@
+{"type":"permission-mode","permissionMode":"default","sessionId":"s1"}
+{"parentUuid":null,"isSidechain":false,"promptId":"p1","type":"user","message":{"role":"user","content":"hi"},"uuid":"u1","timestamp":"2026-04-28T01:00:00.000Z","userType":"human","entrypoint":"cli","cwd":"/repo","sessionId":"s1","version":"1.0","gitBranch":"main"}
+{"parentUuid":"u1","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"requestId":"r1","type":"assistant","uuid":"u2","timestamp":"2026-04-28T01:00:01.000Z","userType":"assistant","entrypoint":"cli","cwd":"/repo","sessionId":"s1","version":"1.0","gitBranch":"main"}
+{"type":"file-history-snapshot","messageId":"u2","snapshot":{"files":["/repo/a.ts"]},"isSnapshotUpdate":false}
+{"type":"last-prompt","leafUuid":"u2","sessionId":"s1"}
+not-json-line-should-be-skipped
+{"parentUuid":"u2","isSidechain":false,"promptId":"p2","type":"user","message":{"role":"user","content":"bye"},"uuid":"u3","timestamp":"2026-04-28T01:01:00.000Z","userType":"human","entrypoint":"cli","cwd":"/repo","sessionId":"s1","version":"1.0","gitBranch":"main"}
