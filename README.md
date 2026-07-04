@@ -67,12 +67,14 @@ claude mcp get claude-sessions   # ✔ Connected 확인
 | 도구 | 무엇 | 인자 |
 |---|---|---|
 | `workspaces` | `~/.claude/projects/` 전체 | 없음 |
-| `sessions_recent` | 최근 mtime 세션 메타 | `workspace_folder?`, `hours?`, `limit?` |
-| `sessions_search` | 모든 jsonl ripgrep | `pattern`, `workspace_folder?`, `limit?` |
-| `session_get` | 단일 세션 메타 + 트랜스크립트 | `jsonl_path`, `max_bytes?` |
-| `session_summarize` | claude -p haiku 즉시 요약 | `jsonl_path` |
+| `sessions_recent` | 최근 세션을 compact 한 줄 포맷으로 (~20 tokens/세션) | `workspace_folder?`, `hours?`, `limit?`, `offset?`, `min_messages?`, `include_self_summaries?` |
+| `sessions_search` | 모든 jsonl 검색, 매치 주변 창으로 미리보기 | `pattern`, `workspace_folder?`, `limit?`, `case_sensitive?` |
+| `session_get` | 단일 세션 메타 + 트랜스크립트 (드릴다운) | `session_id`(8자 prefix 가능) 또는 `jsonl_path`, `max_bytes?` |
+| `session_summarize` | claude -p haiku 즉시 요약 | `session_id` 또는 `jsonl_path` |
 | `memory_read` | 워크스페이스 영구 메모리 읽기 | `workspace_folder`, `file?` |
 | `memory_list` | 메모리 파일 목록 | `workspace_folder` |
+
+목록 도구(`sessions_recent`/`sessions_search`)는 얕게, 상세 도구(`session_get`)는 깊게 — 목록 한 번에 40세션 불러도 ~2k tokens 라 컨텍스트 부담 없음. viewer 가 백그라운드로 돌리는 자기 요약 세션은 목록에서 자동 제외된다.
 
 ## 구조
 

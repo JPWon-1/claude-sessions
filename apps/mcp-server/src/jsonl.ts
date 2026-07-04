@@ -16,8 +16,8 @@ export interface SessionMeta {
   session_id: string;
   jsonl_path: string;
   workspace_folder: string;         // ~/.claude/projects 의 폴더명 (slug)
-  workspace_path?: string;          // 폴더명 reverse-flatten (best-effort)
-  cwd?: string;                     // 첫 이벤트의 cwd (jsonl 안에 박혀있는 절대경로)
+  cwd?: string;                     // 첫 이벤트의 cwd (jsonl 안에 박혀있는 절대경로) — 진짜 경로는 이것
+
   git_branch?: string;
   started_at?: number;              // ms
   ended_at?: number;                // ms (= mtime)
@@ -60,8 +60,8 @@ function toEpochMs(v: unknown): number | undefined {
 
 // ── workspaces ─────────────────────────────────────────────────────────────
 
-export async function listWorkspaces(): Promise<Array<{ folder: string; path: string; jsonl_count: number; last_modified_ms: number }>> {
-  const out: Array<{ folder: string; path: string; jsonl_count: number; last_modified_ms: number }> = [];
+export async function listWorkspaces(): Promise<Array<{ folder: string; jsonl_count: number; last_modified_ms: number }>> {
+  const out: Array<{ folder: string; jsonl_count: number; last_modified_ms: number }> = [];
   let entries: string[] = [];
   try { entries = await readdir(PROJECTS_ROOT); } catch { return out; }
   for (const folder of entries) {
@@ -78,7 +78,6 @@ export async function listWorkspaces(): Promise<Array<{ folder: string; path: st
     }
     out.push({
       folder,
-      path: folder.replace(/-/g, "/"),    // best-effort reverse-flatten
       jsonl_count: jsonls.length,
       last_modified_ms: last,
     });
@@ -102,7 +101,6 @@ export async function readSessionMeta(jsonlPath: string): Promise<SessionMeta> {
     session_id: sessionId,
     jsonl_path: jsonlPath,
     workspace_folder: folder,
-    workspace_path: folder.replace(/-/g, "/"),
     ended_at: st.mtimeMs,
     message_count: 0,
   };
@@ -143,6 +141,37 @@ export interface RipgrepHit {
   text: string;
 }
 
+// jsonl 라인은 수십 KB 짜리 JSON 한 줄인 경우가 많다. 라인 앞부분만 자르면
+// 매치가 잘려나가므로, 매치 위치 주변 창(window)으로 잘라낸다.
+// rg --json 은 UTF-8 byte offset(submatches[0].start)을 주므로 Buffer 로 슬라이스.
+function windowAroundBytes(line: string, byteStart?: number): string {
+  const buf = Buffer.from(line, "utf8");
+  if (byteStart === undefined || byteStart >= buf.length) return line.trim().slice(0, 300);
+  const from = Math.max(0, byteStart - 80);
+  const to = Math.min(buf.length, byteStart + 220);
+  const s = buf.subarray(from, to).toString("utf8").replace(/^�+|�+$/g, "").trim();
+  return (from > 0 ? "…" : "") + s + (to < buf.length ? "…" : "");
+}
+
+// grep 폴백엔 offset 이 없다. 사용자 regex 를 JS 로 재실행하면 `(a+)+b` 류
+// 중첩 수량자에서 백트래킹 폭발로 이벤트 루프 전체가 분 단위로 멈출 수 있어서
+// (단일 스레드 — 모든 MCP 요청 블록), 메타문자 없는 리터럴 패턴만 indexOf 로
+// 창을 잡고 진짜 regex 는 라인 머리로 폴백한다. ERE→JS 문법 차이 문제도 같이 사라짐.
+const REGEX_METACHARS = /[\\^$.|?*+()[\]{}]/;
+function windowAroundPattern(line: string, pattern: string, ignoreCase: boolean): string {
+  if (!REGEX_METACHARS.test(pattern)) {
+    const hay = ignoreCase ? line.toLowerCase() : line;
+    const needle = ignoreCase ? pattern.toLowerCase() : pattern;
+    const idx = hay.indexOf(needle);
+    if (idx >= 0) {
+      const from = Math.max(0, idx - 60);
+      const to = Math.min(line.length, idx + 180);
+      return (from > 0 ? "…" : "") + line.slice(from, to).trim() + (to < line.length ? "…" : "");
+    }
+  }
+  return line.trim().slice(0, 300);
+}
+
 // rg 가 있으면 rg(--json) 으로, 없으면 BSD/GNU grep 으로 자동 폴백.
 // macOS 기본에 rg 가 없는 게 일반적이라 grep 경로가 실용적으로 더 안정.
 export function ripgrep(pattern: string, opts: { workspace?: string; limit?: number; ignoreCase?: boolean } = {}): Promise<RipgrepHit[]> {
@@ -172,10 +201,13 @@ export function ripgrep(pattern: string, opts: { workspace?: string; limit?: num
           if (!line.trim()) continue;
           let obj: any; try { obj = JSON.parse(line); } catch { continue; }
           if (obj.type === "match") {
+            // 비-UTF8 라인은 rg 가 lines.text 대신 lines.bytes (base64) 로 내보낸다
+            const lineText: string = obj.data.lines?.text
+              ?? (obj.data.lines?.bytes ? Buffer.from(obj.data.lines.bytes, "base64").toString("utf8") : "");
             hits.push({
               jsonl_path: obj.data.path.text,
               line_number: obj.data.line_number,
-              text: obj.data.lines.text.trim().slice(0, 500),
+              text: windowAroundBytes(lineText, obj.data.submatches?.[0]?.start),
             });
           }
         }
@@ -217,7 +249,7 @@ function grepFallback(pattern: string, target: string, limit: number, ignoreCase
         hits.push({
           jsonl_path: m[1],
           line_number: Number(m[2]),
-          text: m[3].slice(0, 500),
+          text: windowAroundPattern(m[3], pattern, ignoreCase),
         });
         if (hits.length >= limit) {
           child.kill();
@@ -228,6 +260,23 @@ function grepFallback(pattern: string, target: string, limit: number, ignoreCase
     child.on("close", () => resolve(hits.slice(0, limit)));
     child.on("error", () => resolve([]));
   });
+}
+
+// ── lookup by session_id ───────────────────────────────────────────────────
+// jsonl_path 를 매 응답마다 들고다니지 않아도 session_id 만으로 찾을 수 있게.
+// (~/.claude/projects/*/<session_id>.jsonl) — 같은 id 가 여러 폴더에 있을 가능성은
+// rename 흔적 정도. mtime 큰 쪽을 우선.
+export async function resolveJsonlPath(sessionId: string): Promise<string | null> {
+  let entries: string[] = [];
+  try { entries = await readdir(PROJECTS_ROOT); } catch { return null; }
+  let best: { path: string; mtime: number } | null = null;
+  for (const folder of entries) {
+    const p = path.join(PROJECTS_ROOT, folder, `${sessionId}.jsonl`);
+    const s = await stat(p).catch(() => null);
+    if (!s) continue;
+    if (!best || s.mtimeMs > best.mtime) best = { path: p, mtime: s.mtimeMs };
+  }
+  return best?.path ?? null;
 }
 
 // ── recent ─────────────────────────────────────────────────────────────────
