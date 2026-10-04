@@ -8,8 +8,11 @@
   },
   "scripts": {
     "dev": "tsx src/server.ts",
+    "dev:codex": "tsx src/codex-server.ts",
     "register": "claude mcp add claude-sessions -- tsx $(pwd)/src/server.ts",
-    "unregister": "claude mcp remove claude-sessions"
+    "unregister": "claude mcp remove claude-sessions",
+    "register:codex": "claude mcp add --scope user codex-sessions -- $(pwd)/node_modules/.bin/tsx $(pwd)/src/codex-server.ts",
+    "unregister:codex": "claude mcp remove --scope user codex-sessions"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.0.4"

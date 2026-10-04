@@ -76,6 +76,33 @@ claude mcp get claude-sessions   # ✔ Connected 확인
 
 목록 도구(`sessions_recent`/`sessions_search`)는 얕게, 상세 도구(`session_get`)는 깊게 — 목록 한 번에 40세션 불러도 ~2k tokens 라 컨텍스트 부담 없음. viewer 가 백그라운드로 돌리는 자기 요약 세션은 목록에서 자동 제외된다.
 
+## Codex 세션 MCP (`codex-sessions`)
+
+Codex CLI 가 쓰는 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 을 같은 방식으로 본다. 같은 `apps/mcp-server` 패키지 안의 별도 서버라 설치는 따로 필요 없다.
+
+```bash
+cd apps/mcp-server
+pnpm register:codex                 # claude mcp add --scope user codex-sessions …
+claude mcp get codex-sessions       # ✔ Connected 확인
+```
+
+| 도구 | 무엇 | 인자 |
+|---|---|---|
+| `workspaces` | 세션이 있는 작업 폴더(cwd) 목록 | `include_subagents?` |
+| `sessions_recent` | 최근 세션 compact 한 줄 | `cwd?`, `hours?`, `limit?`, `offset?`, `min_messages?`, `include_subagents?` |
+| `sessions_search` | 대화·도구 호출 본문 검색 | `pattern`, `cwd?`, `limit?`, `case_sensitive?`, `include_tool_output?`, `include_subagents?` |
+| `session_get` | 단일 세션 메타 + 트랜스크립트 | `session_id`(8자 이상 prefix) 또는 `jsonl_path`, `max_bytes?`, `include_tool_results?` |
+| `session_summarize` | claude -p haiku 즉시 요약 | `session_id` 또는 `jsonl_path` |
+
+Claude 판과 다른 점:
+
+- 워크스페이스 폴더가 없어서 첫 줄 `session_meta` 의 `cwd` 로 묶는다. `cwd` 필터는 그 폴더와 하위 폴더를 모두 잡는다.
+- user 역할로 주입되는 AGENTS.md·environment_context 는 프롬프트로 치지 않는다. Orca 워커 세션은 프로토콜 안내문 대신 `=== TASK ===` 뒤의 실제 지시를 보여 준다.
+- 검색은 매치된 줄을 파싱해 대화·도구 호출만 남긴다. 시스템 지시문, 토큰 집계, 암호화된 reasoning 에 걸린 매치는 버린다.
+- guardian 자동 검토 같은 서브에이전트 세션은 기본으로 뺀다(`include_subagents`).
+- 세션 id 가 uuid v7 이라 앞 8자가 약 65초 단위 시각이다. 목록에는 13자를 보여 준다.
+- 메모리 도구는 없다. Codex 메모리는 SQLite(`~/.codex/memories_1.sqlite`)라 형식이 다르다.
+
 ## 구조
 
 ```
@@ -86,7 +113,7 @@ claude-sessions/
 │   │   ├── lib/        parser·indexer·db·summarizer·clustering·automation
 │   │   └── tests/      vitest
 │   └── mcp-server/     jsonl-direct MCP. DB 의존 X (viewer DB 비독립)
-│       └── src/        server.ts + jsonl.ts + memory.ts + tools/
+│       └── src/        server.ts + jsonl.ts + memory.ts (Claude) · codex-server.ts + codex/rollout.ts (Codex)
 ├── docs/superpowers/   spec + 구현 plan
 ├── asana-claude.md     자매 프로젝트 (asana-claude-bridge) 설계 노트
 └── README.md

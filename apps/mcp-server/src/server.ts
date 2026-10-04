@@ -30,6 +30,7 @@ const SELF_SUMMARY_PREFIXES = [
   "다음은 한 주 동안 진행된 코딩 세션",
   "위 세션들을 작업 의도",
   "다음 Claude Code 세션 트랜스크립트", // session_summarize 자신이 spawn 하는 claude -p 프롬프트
+  "다음 Codex 세션 트랜스크립트",       // codex-sessions 의 session_summarize 가 spawn 하는 claude -p 프롬프트
 ];
 function isSelfSummary(prompt: string | undefined): boolean {
   if (!prompt) return false;
