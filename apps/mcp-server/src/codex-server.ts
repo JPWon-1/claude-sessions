@@ -6,7 +6,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
-  SESSIONS_ROOT, cwdExists, filesFor, listWorkspaces, readSessionMeta, readHeader, readTranscript,
+  SESSIONS_ROOT, cwdExists, displayIds, filesFor, listWorkspaces, readSessionMeta, readHeader, readTranscript,
   resolveRolloutPath, searchRollouts, summarizeAdhoc, type CodexSessionMeta,
 } from "./codex/rollout.js";
 
@@ -40,9 +40,27 @@ function fmtWs(cwd: string | undefined, branch: string | undefined): string {
   const ws = tail.length > 28 ? "…" + tail.slice(-27) : tail;
   return branch ? `${ws}[${branch}]` : ws;
 }
-// uuid v7 앞 8자는 약 65초 단위 시각이라 겹친다. 13자(밀리초 시각까지)를 표시한다.
+// uuid v7 앞 8자는 약 65초 단위 시각이라 겹친다. 기본 13자(밀리초 시각까지)를 표시하고,
+// 같은 밀리초에 뜬 세션이 있으면 갈라지는 글자까지 늘린다(displayIds). 호출마다 갱신한다.
+let shortIds = new Map<string, string>();
 function fmtId(id: string): string {
-  return id.slice(0, 13);
+  return shortIds.get(id) ?? id.slice(0, 13);
+}
+
+// 숫자 인자 검사. 음수 offset 같은 값을 받아 "(no sessions)" 를 정상처럼 돌려주지 않는다.
+function intArg(args: any, name: string, def: number, min: number, max?: number): number {
+  const v = args[name] ?? def;
+  if (!Number.isInteger(v) || v < min || (max !== undefined && v > max)) {
+    throw new Error(`${name} must be an integer >= ${min}${max !== undefined ? ` and <= ${max}` : ""}, got ${JSON.stringify(args[name])}`);
+  }
+  return v;
+}
+function hoursArg(args: any, def: number): number {
+  const v = args.hours ?? def;
+  if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+    throw new Error(`hours must be a positive number, got ${JSON.stringify(args.hours)}`);
+  }
+  return v;
 }
 
 // 제목(session_index 의 thread_name)은 사람이 대화한 세션에서만 쓴다. Orca 워커 세션의 제목은
@@ -98,15 +116,15 @@ const TOOLS = [
   },
   {
     name: "sessions_recent",
-    description: "Shallow list of recent Codex sessions, one per line: `time │ dur │ msgs │ id │ ws[branch] │ title/prompt` (time is server-local). For Orca worker sessions the prompt shows the TASK block, not the protocol preamble. Pass the id column to session_get/session_summarize. DO NOT auto-call session_get for each row unless the user asks about a specific session.",
+    description: "Shallow list of recent Codex sessions, one per line: `time │ dur │ msgs │ id │ ws[branch] │ title/prompt`. Rows are ordered by LAST ACTIVITY (file mtime, newest first); the time column is the session START time (server-local), so a long-running session can appear above one that started later. For Orca worker sessions the prompt shows the TASK block, not the protocol preamble. Pass the id column to session_get/session_summarize. DO NOT auto-call session_get for each row unless the user asks about a specific session.",
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: CWD_DESC },
-        hours: { type: "number", description: "Only sessions modified within this many hours. Default 48." },
-        limit: { type: "number", description: "Max sessions. Default 20." },
-        offset: { type: "number", description: "Skip this many (pagination). Default 0." },
-        min_messages: { type: "number", description: "Drop sessions with fewer user+assistant messages than this. Default 2." },
+        hours: { type: "number", exclusiveMinimum: 0, description: "Only sessions with activity (file modified) within this many hours. Default 48." },
+        limit: { type: "integer", minimum: 1, maximum: 200, description: "Max sessions. Default 20." },
+        offset: { type: "integer", minimum: 0, description: "Skip this many (pagination). Default 0." },
+        min_messages: { type: "integer", minimum: 0, description: "Drop sessions with fewer user+assistant messages than this. Default 2." },
         include_subagents: { type: "boolean", description: SUBAGENT_DESC },
       },
       additionalProperties: false,
@@ -118,9 +136,9 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        pattern: { type: "string", description: "Regex (grep -E / ripgrep syntax). Literal text works best: its preview is centered on the match." },
+        pattern: { type: "string", description: "Regex in ripgrep syntax, matched against the readable text (not the raw JSON), so quotes and ^/$ anchors work per text line. Plain text without regex metacharacters is fastest." },
         cwd: { type: "string", description: CWD_DESC },
-        limit: { type: "number", description: "Max hits. Default 50." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Max hits. Default 50." },
         case_sensitive: { type: "boolean", description: "Default false." },
         include_tool_output: { type: "boolean", description: "Also search tool outputs (command results; noisy). Default false." },
         include_subagents: { type: "boolean", description: SUBAGENT_DESC },
@@ -137,7 +155,7 @@ const TOOLS = [
       properties: {
         session_id: { type: "string", description: "Session uuid or a prefix of at least 8 chars." },
         jsonl_path: { type: "string", description: "Absolute path to the rollout .jsonl (alternative to session_id)." },
-        max_bytes: { type: "number", description: "Truncate transcript to this many chars (default 40000)." },
+        max_bytes: { type: "integer", minimum: 1, description: "Truncate transcript to this many chars (default 40000)." },
         include_tool_results: { type: "boolean", description: "Include tool outputs (noisy). Default false." },
       },
       additionalProperties: false,
@@ -162,6 +180,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args = {} } = req.params as { name: string; arguments?: any };
   try {
+    shortIds = await displayIds();
     switch (name) {
       case "workspaces": {
         const ws = await listWorkspaces({ includeSubagents: args.include_subagents });
@@ -169,10 +188,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         return textOut(lines.length ? lines.join("\n") : "(no Codex sessions)");
       }
       case "sessions_recent": {
-        const limit = args.limit ?? 20;
-        const offset = args.offset ?? 0;
-        const minMsgs = args.min_messages ?? 2;
-        const files = await filesFor({ cwd: args.cwd, hours: args.hours ?? 48, includeSubagents: args.include_subagents });
+        const limit = intArg(args, "limit", 20, 1, 200);
+        const offset = intArg(args, "offset", 0, 0);
+        const minMsgs = intArg(args, "min_messages", 2, 0);
+        const files = await filesFor({ cwd: args.cwd, hours: hoursArg(args, 48), includeSubagents: args.include_subagents });
         // 파일이 크다(최대 수백 MB). 필요한 만큼 채워지면 멈춘다.
         const want = offset + limit;
         const kept: CodexSessionMeta[] = [];
@@ -190,7 +209,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           throw new Error(`no Codex sessions ever ran under cwd '${args.cwd}' — get exact values from the workspaces tool`);
         }
         const page = kept.slice(offset, offset + limit);
-        const header = "time             │  dur │ msgs │ id            │ ws[branch] │ title/prompt";
+        const header = "start            │  dur │ msgs │ id            │ ws[branch] │ title/prompt   (newest activity first)";
         return textOut(page.length ? `${header}\n${page.map(fmtCompact).join("\n")}` : "(no sessions)");
       }
       case "sessions_search": {
@@ -201,7 +220,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         const hits = await searchRollouts(args.pattern, {
           files,
-          limit: args.limit ?? 50,
+          limit: intArg(args, "limit", 50, 1, 500),
           ignoreCase: !args.case_sensitive,
           includeToolOutput: args.include_tool_output,
         });
@@ -221,7 +240,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "session_get": {
         const p = await resolvePath(args);
         const meta = await readSessionMeta(p);
-        const transcript = await readTranscript({ jsonlPath: p, maxBytes: args.max_bytes, includeToolResults: args.include_tool_results });
+        const transcript = await readTranscript({ jsonlPath: p, maxBytes: intArg(args, "max_bytes", 40_000, 1), includeToolResults: args.include_tool_results });
         return textOut(JSON.stringify(meta, null, 2) + "\n\n---\n\n" + transcript);
       }
       case "session_summarize": {

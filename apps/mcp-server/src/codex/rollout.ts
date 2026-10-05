@@ -54,9 +54,14 @@ function isInjected(text: string): boolean {
 }
 
 // Orca 디스패치 안내문이면 실제 지시(TASK 블록)만 남긴다. 뒤에 붙는 environment_context 도 뗀다.
+// 사람이 쓴 대화에 "=== TASK ===" 라는 글자가 들어가도 자르지 않도록 안내문으로 시작할 때만 적용한다.
+const ORCA_PREAMBLE = "You are working inside Orca";
+function isOrcaPreamble(text: string): boolean {
+  return text.trimStart().startsWith(ORCA_PREAMBLE) && text.includes("=== TASK ===");
+}
 function taskOnly(text: string): string {
+  if (!isOrcaPreamble(text)) return text;
   const i = text.indexOf("=== TASK ===");
-  if (i < 0) return text;
   const body = text.slice(i + "=== TASK ===".length);
   const env = body.indexOf("<environment_context>");
   return (env >= 0 ? body.slice(0, env) : body).trim();
@@ -223,7 +228,7 @@ export async function readSessionMeta(p: string): Promise<CodexSessionMeta> {
     count++;
     if (!meta.first_user_prompt) {
       const joined = real.join("\n");
-      meta.is_orca_worker = joined.includes("=== TASK ===");
+      meta.is_orca_worker = isOrcaPreamble(joined);
       meta.first_user_prompt = taskOnly(joined).slice(0, 500);
     }
   }
@@ -281,6 +286,34 @@ export async function filesFor(opts: { cwd?: string; hours?: number; includeSuba
   return out;
 }
 
+// ── 표시용 짧은 id ─────────────────────────────────────────────────────────
+// 기본 13자(uuid v7 의 밀리초 시각까지). 같은 밀리초에 뜬 세션이 실제로 있어서(01a0f120-a8f8…)
+// 그런 id 는 다른 세션과 갈라지는 글자까지 늘린다. 목록에 보인 id 를 그대로 session_get 에 넘기면
+// 항상 한 세션으로 풀린다.
+
+const MIN_DISPLAY = 13;
+let displayCache: { key: string; map: Map<string, string> } | null = null;
+
+function fileIdOf(p: string): string {
+  return path.basename(p, ".jsonl").replace(/^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/, "");
+}
+
+export async function displayIds(): Promise<Map<string, string>> {
+  const files = await allRolloutFiles();
+  const key = `${files.length}:${files[0]?.mtime ?? 0}`;
+  if (displayCache && displayCache.key === key) return displayCache.map;
+  const ids = Array.from(new Set(files.map(f => fileIdOf(f.path)))).sort();
+  const lcp = (a = "", b = "") => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; };
+  const map = new Map<string, string>();
+  ids.forEach((id, i) => {
+    let n = Math.max(MIN_DISPLAY, lcp(id, ids[i - 1]) + 1, lcp(id, ids[i + 1]) + 1);
+    if (id[n - 1] === "-") n++;            // 하이픈으로 끝나지 않게
+    map.set(id, id.slice(0, Math.min(n, id.length)));
+  });
+  displayCache = { key, map };
+  return map;
+}
+
 // ── id → 파일 ──────────────────────────────────────────────────────────────
 // 파일명 끝이 세션 uuid 다. prefix 가 여러 세션에 걸리면 조용히 하나를 고르지 않고 에러.
 
@@ -301,35 +334,22 @@ export async function resolveRolloutPath(id: string): Promise<string> {
 }
 
 // ── 검색 ───────────────────────────────────────────────────────────────────
-// 줄 하나가 JSON 이벤트라 그대로 grep 하면 session_meta(시스템 지시문)·토큰 집계·주입 텍스트에
-// 걸린다. 매치된 줄을 파싱해서 사람이 읽을 대화·도구 호출 줄만 남긴다.
+// 원본 줄(JSON)에 정규식을 걸면 따옴표·역슬래시가 이스케이프돼 있고 줄의 시작이 대화의 시작이
+// 아니라서 결과가 빠진다. 그래서 파일을 최신순으로 하나씩 열어 사람이 읽는 텍스트(대화·도구 호출)를
+// 꺼내고, 그 텍스트를 표준입력으로 rg 에 넘겨 매치한다. 정규식은 rg 한 엔진만 해석한다
+// (JS 로 다시 돌리지 않으므로 문법 차이·백트래킹 폭발·길이 제한이 없다).
+//
+// 속도: 패턴이 원본 파일에도 글자 그대로 있다고 보장되는 문자열이면 먼저 rg -l 로 그 문자열이
+// 든 파일만 고른다(PREFILTER_UNSAFE 참고). 아니면 모든 대상 파일을 연다.
+//
+// rg 가 없으면 grep 으로 대신하되 문자열(고정 문자열) 검색만 한다. grep -E 는 rg 와 정규식 문법이
+// 달라(예: \p{Greek}) 조용히 0건을 낼 수 있고 매치 위치도 주지 않기 때문이다. 정규식이면 에러.
 
 export interface CodexHit {
   jsonl_path: string;
   line_number: number;
   kind: string;      // user / assistant / tool / tool_output
   text: string;      // 매치 주변 창
-}
-
-const REGEX_METACHARS = /[\\^$.|?*+()[\]{}]/;
-
-function windowAround(text: string, pattern: string, ignoreCase: boolean): string {
-  let idx = -1;
-  if (!REGEX_METACHARS.test(pattern)) {
-    idx = (ignoreCase ? text.toLowerCase() : text).indexOf(ignoreCase ? pattern.toLowerCase() : pattern);
-  } else {
-    // 사용자 regex 를 JS 로 돌리면 백트래킹 폭발 위험이 있어 길이를 제한한 텍스트에만 시도
-    try {
-      const re = new RegExp(pattern, ignoreCase ? "i" : "");
-      const m = re.exec(text.slice(0, 20_000));
-      if (m) idx = m.index;
-    } catch { /* PCRE 전용 문법이면 앞부분으로 */ }
-  }
-  const flat = (s: string) => s.replace(/\s+/g, " ").trim();
-  if (idx < 0) return flat(text.slice(0, 220));
-  const from = Math.max(0, idx - 60);
-  const to = Math.min(text.length, idx + 180);
-  return (from > 0 ? "…" : "") + flat(text.slice(from, to)) + (to < text.length ? "…" : "");
 }
 
 // 매치된 줄에서 사람이 볼 텍스트와 종류를 뽑는다. 볼 필요 없는 줄이면 null.
@@ -359,33 +379,111 @@ function rgAvailable(): boolean {
   return spawnSync("rg", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
-// 사람이 읽는 텍스트 안에 매치가 있는지 다시 본다(JSON 키·이스케이프·잘라낸 Orca 안내문에 걸린 줄 제외).
-// regex 는 JS 로 다시 돌리되 백트래킹 폭발을 막으려고 앞 50k 자에만 시도한다.
-// JS 가 못 읽는 문법(PCRE 전용)이면 판단할 수 없으니 남긴다.
-function textMatches(text: string, pattern: string, ignoreCase: boolean): boolean {
-  if (!REGEX_METACHARS.test(pattern)) {
-    return (ignoreCase ? text.toLowerCase() : text).includes(ignoreCase ? pattern.toLowerCase() : pattern);
-  }
-  let re: RegExp;
-  try { re = new RegExp(pattern, ignoreCase ? "i" : ""); } catch { return true; }
-  return re.test(text.slice(0, 50_000));
+// 정규식 메타문자가 있는가. 있으면 정규식 검색이다.
+const REGEX_META = /[\\^$.|?*+()[\]{}]/;
+// 원본 JSON 에도 글자 그대로 들어 있다고 보장되지 않는 패턴인가. 해당하면 사전 필터를 건너뛴다.
+// - 정규식 메타문자: 따옴표·제어문자 같은 이스케이프 대상 글자와 매치할 수 있다
+// - 따옴표·역슬래시·제어문자(탭 등): 원본에는 \" \\ \t 처럼 이스케이프돼 있다
+// - 콜론: 도구 호출은 "이름: 인자" 로 이어 붙여 만든 텍스트라 원본에 그 모양이 없다
+// 한글 등 비 ASCII 글자는 Codex 가 이스케이프하지 않고 그대로 쓴다(2026-10-05 전수 확인: 대화·도구 줄에서
+// 바깥층 \uXXXX 이스케이프는 제어문자뿐이고, 나머지 \uXXXX 는 내용 자체에 든 글자였다). 그래서 한글
+// 문자열도 사전 필터를 쓴다. Codex 가 기록 방식을 바꾸면 이 전제를 다시 확인할 것.
+const PREFILTER_UNSAFE = /[\\^$.|?*+()[\]{}":\u0000-\u001f\u007f]/;
+
+function searchError(code: number | null, err: string): Error {
+  const detail = err.trim().split("\n").map(s => s.trim()).filter(Boolean).slice(0, 4).join(" ");
+  return new Error(code === null ? "search killed by a signal" : `search error (exit ${code}): ${detail || "unknown"}`);
 }
 
-// grep/rg 한 번에 넘기는 파일 수. 인자 길이 한도(E2BIG)를 피하고, 최신 파일부터 훑다가
-// limit 이 차면 나머지 파일은 아예 읽지 않는다.
-const FILES_PER_RUN = 100;
+// 1단계: 문자열이 든 파일만 고른다(순서는 호출자가 가진 최신순 목록을 따른다).
+// 파일 100개씩 넘겨 인자 길이 한도(E2BIG)를 피한다.
+async function filesContaining(pattern: string, files: string[], ignoreCase: boolean, useRg: boolean): Promise<Set<string>> {
+  const found = new Set<string>();
+  for (let i = 0; i < files.length; i += 100) {
+    const batch = files.slice(i, i + 100);
+    const args = useRg
+      ? ["--no-config", "-l", "-F", ...(ignoreCase ? ["-i"] : []), "-e", pattern, "--", ...batch]
+      : ["-l", "-F", ...(ignoreCase ? ["-i"] : []), "-e", pattern, "--", ...batch];
+    // (사전 필터는 PREFILTER_UNSAFE 를 통과한 순수 문자열에서만 불리므로 grep -F 와 rg -F 가 같은 뜻이다)
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(useRg ? "rg" : "grep", args, { stdio: ["ignore", "pipe", "pipe"] });
+      let out = "", err = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (d: string) => { out += d; });
+      child.stderr.on("data", d => { err += d.toString(); });
+      child.on("error", e => reject(new Error(`search failed to start: ${e.message}`)));
+      child.on("close", code => {
+        if (code === null || code > 1) return reject(searchError(code, err));
+        for (const l of out.split("\n")) if (l) found.add(l);
+        resolve();
+      });
+    });
+  }
+  return found;
+}
 
-function grepFiles(pattern: string, files: string[], ignoreCase: boolean,
-                   onLine: (path: string, lineNo: number, json: string) => boolean): Promise<void> {
-  const useRg = rgAvailable();
+interface Rec { lineNo: number; kind: string; text: string }
+
+async function extractRecords(file: string, includeToolOutput: boolean): Promise<Rec[]> {
+  const recs: Rec[] = [];
+  const stream = createReadStream(file, { encoding: "utf8" });
+  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  let lineNo = 0;
+  for await (const line of rl) {
+    lineNo++;
+    if (!line.includes('"type":"response_item"')) continue;
+    let o: any; try { o = JSON.parse(line); } catch { continue; }
+    const st = searchableText(o);
+    if (!st) continue;
+    if (st.kind === "tool_output" && !includeToolOutput) continue;
+    recs.push({ lineNo, kind: st.kind, text: st.text.replace(/\r\n?/g, "\n") });
+  }
+  return recs;
+}
+
+// grep 대체 경로용: 고정 문자열의 위치(바이트)를 찾는다.
+function literalByteOffset(line: string, pattern: string, ignoreCase: boolean): number | undefined {
+  const i = (ignoreCase ? line.toLowerCase() : line).indexOf(ignoreCase ? pattern.toLowerCase() : pattern);
+  return i < 0 ? undefined : Buffer.byteLength(line.slice(0, i), "utf8");
+}
+
+// 매치 위치(바이트) 주변 창. 매치가 앞에 있으면 앞을 덜 자른다.
+function windowAroundBytes(line: string, byteStart?: number): string {
+  const flat = (s: string) => s.replace(/\s+/g, " ").trim();
+  const buf = Buffer.from(line, "utf8");
+  if (byteStart === undefined || byteStart >= buf.length) return flat(line.slice(0, 220));
+  const from = Math.max(0, byteStart - 80);
+  const to = Math.min(buf.length, byteStart + 220);
+  const s = buf.subarray(from, to).toString("utf8").replace(/^\uFFFD+|\uFFFD+$/g, "");
+  return (from > 0 ? "…" : "") + flat(s) + (to < buf.length ? "…" : "");
+}
+
+// 2단계: 한 파일의 텍스트를 표준입력으로 넘겨 매치. 레코드 하나(= 원본 줄 하나)에 결과 하나.
+function matchRecords(pattern: string, recs: Rec[], ignoreCase: boolean, useRg: boolean, room: number): Promise<Array<{ rec: Rec; text: string }>> {
+  // stdin 줄 번호(1부터) → 레코드. 레코드마다 시작 줄 번호를 기록해 이분 탐색한다.
+  const starts: number[] = [];
+  const parts: string[] = [];
+  let next = 1;
+  for (const r of recs) {
+    starts.push(next);
+    parts.push(r.text);
+    next += r.text.split("\n").length;
+  }
+  const recAt = (n: number): number => {
+    let lo = 0, hi = starts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= n) lo = mid; else hi = mid - 1; }
+    return lo;
+  };
   const args = useRg
-    ? ["--no-config", "--no-heading", "--with-filename", "--line-number", ...(ignoreCase ? ["-i"] : []), "-e", pattern, "--", ...files]
-    : ["-IEnH", ...(ignoreCase ? ["-i"] : []), "-e", pattern, "--", ...files];
+    // --text/-a: 도구 출력에 NUL 같은 바이너리 문자가 섞여도 "binary file matches" 로 끊지 않게
+    ? ["--no-config", "--json", "--text", ...(ignoreCase ? ["-i"] : []), "-e", pattern, "-"]
+    : ["-anF", ...(ignoreCase ? ["-i"] : []), "-e", pattern];   // 대체 경로는 고정 문자열만
   return new Promise((resolve, reject) => {
-    const child = spawn(useRg ? "rg" : "grep", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let buf = "";
-    let err = "";
-    let stopped = false;
+    const child = spawn(useRg ? "rg" : "grep", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const out: Array<{ rec: Rec; text: string }> = [];
+    const seen = new Set<number>();
+    let buf = "", err = "", stopped = false;
+    child.stdin.on("error", () => { /* 조기 종료로 파이프가 닫힌 경우 */ });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (stopped) return;
@@ -394,21 +492,34 @@ function grepFiles(pattern: string, files: string[], ignoreCase: boolean,
       while ((idx = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, idx);
         buf = buf.slice(idx + 1);
-        // 형식: <path>:<lineno>:<json>. [\s\S] 는 JSON 안의 날것 U+2028/2029 까지 잡기 위해서
-        const m = line.match(/^(.+?\.jsonl):(\d+):([\s\S]*)$/);
-        if (!m) continue;
-        if (onLine(m[1], Number(m[2]), m[3])) { stopped = true; child.kill(); return; }
+        let n: number, text: string;
+        if (useRg) {
+          let o: any; try { o = JSON.parse(line); } catch { continue; }
+          if (o.type !== "match") continue;
+          n = o.data.line_number;
+          const lt: string = o.data.lines?.text ?? (o.data.lines?.bytes ? Buffer.from(o.data.lines.bytes, "base64").toString("utf8") : "");
+          text = windowAroundBytes(lt.replace(/\n$/, ""), o.data.submatches?.[0]?.start);
+        } else {
+          const m = line.match(/^(\d+):([\s\S]*)$/);
+          if (!m) continue;
+          n = Number(m[1]);
+          text = windowAroundBytes(m[2], literalByteOffset(m[2], pattern, ignoreCase));
+        }
+        const ri = recAt(n);
+        if (seen.has(ri)) continue;
+        seen.add(ri);
+        out.push({ rec: recs[ri], text });
+        if (out.length >= room) { stopped = true; child.kill(); return; }
       }
     });
     child.stderr.on("data", d => { err += d.toString(); });
     child.on("error", e => reject(new Error(`search failed to start: ${e.message}`)));
     child.on("close", code => {
-      // grep/rg 모두 0=매치 있음, 1=매치 없음, 2=오류(잘못된 정규식 등). 오류를 "결과 없음"으로 삼키지 않는다.
-      if (!stopped && code !== null && code > 1) {
-        return reject(new Error(`search error (exit ${code}): ${err.trim().split("\n").map(s => s.trim()).filter(Boolean).slice(0, 4).join(" ") || "unknown"}`));
-      }
-      resolve();
+      // 0=매치, 1=매치 없음, 2=오류(잘못된 정규식 등), null=신호로 종료. 오류를 "결과 없음"으로 삼키지 않는다.
+      if (!stopped && (code === null || code > 1)) return reject(searchError(code, err));
+      resolve(out);
     });
+    child.stdin.end(parts.join("\n") + "\n");
   });
 }
 
@@ -420,19 +531,23 @@ export async function searchRollouts(pattern: string, opts: {
 }): Promise<CodexHit[]> {
   const limit = opts.limit ?? 50;
   const ignoreCase = opts.ignoreCase !== false;
+  const useRg = rgAvailable();
+  if (!useRg && REGEX_META.test(pattern)) {
+    throw new Error("regex search needs ripgrep (rg) — install it (e.g. brew install ripgrep) or search plain text without regex metacharacters");
+  }
+  let files = opts.files;
+  if (!PREFILTER_UNSAFE.test(pattern)) {
+    const has = await filesContaining(pattern, files, ignoreCase, useRg);
+    files = files.filter(f => has.has(f));
+  }
   const hits: CodexHit[] = [];
-  // grep 의 --max-count 는 걸러지기 전 줄(item_completed 중복, 도구 출력 등)까지 세서
-  // 진짜 매치를 놓친다. 그래서 상한은 거른 뒤에 센다.
-  for (let i = 0; i < opts.files.length && hits.length < limit; i += FILES_PER_RUN) {
-    await grepFiles(pattern, opts.files.slice(i, i + FILES_PER_RUN), ignoreCase, (p, lineNo, json) => {
-      let o: any; try { o = JSON.parse(json); } catch { return false; }
-      const st = searchableText(o);
-      if (!st) return false;
-      if (st.kind === "tool_output" && !opts.includeToolOutput) return false;
-      if (!textMatches(st.text, pattern, ignoreCase)) return false;
-      hits.push({ jsonl_path: p, line_number: lineNo, kind: st.kind, text: windowAround(st.text, pattern, ignoreCase) });
-      return hits.length >= limit;
-    });
+  // 파일 하나씩 최신순으로. 상한은 사람이 읽는 텍스트에서 매치된 뒤에 센다.
+  for (const f of files) {
+    if (hits.length >= limit) break;
+    const recs = await extractRecords(f, !!opts.includeToolOutput);
+    if (!recs.length) continue;
+    const found = await matchRecords(pattern, recs, ignoreCase, useRg, limit - hits.length);
+    for (const x of found) hits.push({ jsonl_path: f, line_number: x.rec.lineNo, kind: x.rec.kind, text: x.text });
   }
   return hits;
 }
@@ -441,6 +556,7 @@ export async function searchRollouts(pattern: string, opts: {
 
 export async function readTranscript(opts: { jsonlPath: string; maxBytes?: number; includeToolResults?: boolean }): Promise<string> {
   const maxBytes = opts.maxBytes ?? 40_000;
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error(`max_bytes must be a positive integer: ${maxBytes}`);
   const lines: string[] = [];
   const stream = createReadStream(opts.jsonlPath, { encoding: "utf8" });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -455,9 +571,12 @@ export async function readTranscript(opts: { jsonlPath: string; maxBytes?: numbe
     else if (st.kind === "tool_output" && opts.includeToolResults) lines.push(`[tool_result] ${st.text.slice(0, 400)}`);
   }
   let text = lines.join("\n");
+  // 반씩 앞뒤를 남긴다. maxBytes 가 1 이면 half=0 이고 slice(-0) 은 전체를 돌려주므로 따로 처리.
   if (text.length > maxBytes) {
     const half = Math.floor(maxBytes / 2);
-    text = text.slice(0, half) + "\n…(truncated)…\n" + text.slice(-half);
+    text = half > 0
+      ? text.slice(0, half) + "\n…(truncated)…\n" + text.slice(text.length - half)
+      : text.slice(0, maxBytes) + "\n…(truncated)…";
   }
   return text;
 }
