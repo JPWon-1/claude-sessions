@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // claude-sessions MCP server — jsonl-direct, DB-free.
-// Stdio transport. 등록: `claude mcp add claude-sessions -- tsx <abs>/src/server.ts`
+// Stdio transport(직접 실행) 또는 src/http.ts 가 createServer() 로 HTTP 공유 서버에 올린다. 등록: `claude mcp add claude-sessions -- tsx <abs>/src/server.ts`
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   listWorkspaces, readSessionMeta, ripgrep, recentJsonls, readTranscript, summarizeAdhoc,
   ripgrepAvailable, PROJECTS_ROOT, resolveJsonlPath, type SessionMeta,
@@ -143,10 +145,6 @@ async function assertWorkspace(folder: string): Promise<void> {
   }
 }
 
-const server = new Server(
-  { name: "claude-sessions", version: "0.1.0" },
-  { capabilities: { tools: {} } }
-);
 
 // ── tool list ──────────────────────────────────────────────────────────────
 const TOOLS = [
@@ -237,9 +235,8 @@ const TOOLS = [
   },
 ];
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
+async function handleCall(req: CallToolRequest, extra: { signal: AbortSignal }) {
   const { name, arguments: args = {} } = req.params as { name: string; arguments?: any };
   try {
     switch (name) {
@@ -286,6 +283,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
           workspace: args.workspace_folder,
           limit: args.limit ?? 50,
           ignoreCase: !args.case_sensitive,
+          signal: extra.signal,
         });
         const uniqPaths = Array.from(new Set(hits.map(h => h.jsonl_path)));
         const metas = await Promise.all(uniqPaths.map(p => readSessionMeta(p).catch(() => null)));
@@ -312,7 +310,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "session_summarize": {
         const jsonlPath = await resolvePath(args);
-        const r = await summarizeAdhoc(jsonlPath);
+        const r = await summarizeAdhoc(jsonlPath, undefined, extra.signal);
         return textOut(r.ok ? r.text : `요약 실패: ${r.reason ?? "unknown"}\n\n${r.text}`);
       }
       case "memory_read": {
@@ -334,13 +332,27 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const msg = e instanceof Error ? e.message : String(e);
     return { content: [{ type: "text", text: `error: ${msg}` }], isError: true };
   }
-});
-
-// 시작 시 sanity check (stderr 로만)
-if (!ripgrepAvailable()) {
-  process.stderr.write("⚠ ripgrep (`rg`) not found — sessions_search will return empty\n");
 }
-process.stderr.write(`claude-sessions MCP server ready. PROJECTS_ROOT=${PROJECTS_ROOT}\n`);
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+/** stdio·HTTP 공용. HTTP(stateless)는 요청마다 새 인스턴스를 만든다. */
+export function createServer(): Server {
+  const server = new Server(
+    { name: "claude-sessions", version: "0.1.0" },
+    { capabilities: { tools: {} } }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(CallToolRequestSchema, handleCall);
+  return server;
+}
+
+// 직접 실행(tsx src/server.ts)일 때만 stdio 로 뜬다. http.ts 가 import 할 때는 뜨지 않는다.
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? "")).href) {
+  // 시작 시 sanity check (stderr 로만)
+  if (!ripgrepAvailable()) {
+    process.stderr.write("⚠ ripgrep (`rg`) not found — sessions_search will return empty\n");
+  }
+  process.stderr.write(`claude-sessions MCP server ready. PROJECTS_ROOT=${PROJECTS_ROOT}\n`);
+
+  const transport = new StdioServerTransport();
+  await createServer().connect(transport);
+}

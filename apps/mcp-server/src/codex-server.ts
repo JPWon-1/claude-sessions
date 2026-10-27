@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // codex-sessions MCP server — Codex CLI 세션(~/.codex/sessions) 을 claude-sessions 와 같은 방식으로 조회.
-// Stdio transport. 등록: `claude mcp add --scope user codex-sessions -- tsx <abs>/src/codex-server.ts`
+// Stdio transport(직접 실행) 또는 src/http.ts 가 createServer() 로 HTTP 공유 서버에 올린다. 등록: `claude mcp add --scope user codex-sessions -- tsx <abs>/src/codex-server.ts`
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   SESSIONS_ROOT, cwdExists, displayIds, filesFor, listWorkspaces, readSessionMeta, readHeader, readTranscript,
   resolveRolloutPath, searchRollouts, summarizeAdhoc, type CodexSessionMeta,
@@ -95,10 +97,6 @@ async function resolvePath(args: any): Promise<string> {
   return resolveRolloutPath(args.session_id);
 }
 
-const server = new Server(
-  { name: "codex-sessions", version: "0.1.0" },
-  { capabilities: { tools: {} } }
-);
 
 // ── tool list ──────────────────────────────────────────────────────────────
 const CWD_DESC = "Optional. Absolute working directory; matches sessions started in it or any subfolder (e.g. '/Users/alice/projects/my-app'). Get exact values from the workspaces tool.";
@@ -175,9 +173,8 @@ const TOOLS = [
   },
 ];
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
+async function handleCall(req: CallToolRequest, extra: { signal: AbortSignal }) {
   const { name, arguments: args = {} } = req.params as { name: string; arguments?: any };
   try {
     shortIds = await displayIds();
@@ -245,7 +242,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case "session_summarize": {
         const p = await resolvePath(args);
-        const r = await summarizeAdhoc(p);
+        const r = await summarizeAdhoc(p, undefined, extra.signal);
         return textOut(r.ok ? r.text : `요약 실패: ${r.reason ?? "unknown"}\n\n${r.text}`);
       }
       default:
@@ -255,9 +252,23 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const msg = e instanceof Error ? e.message : String(e);
     return { content: [{ type: "text", text: `error: ${msg}` }], isError: true };
   }
-});
+}
 
-process.stderr.write(`codex-sessions MCP server ready. SESSIONS_ROOT=${SESSIONS_ROOT}\n`);
+/** stdio·HTTP 공용. HTTP(stateless)는 요청마다 새 인스턴스를 만든다. */
+export function createServer(): Server {
+  const server = new Server(
+    { name: "codex-sessions", version: "0.1.0" },
+    { capabilities: { tools: {} } }
+  );
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(CallToolRequestSchema, handleCall);
+  return server;
+}
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// 직접 실행(tsx src/codex-server.ts)일 때만 stdio 로 뜬다. http.ts 가 import 할 때는 뜨지 않는다.
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? "")).href) {
+  process.stderr.write(`codex-sessions MCP server ready. SESSIONS_ROOT=${SESSIONS_ROOT}\n`);
+
+  const transport = new StdioServerTransport();
+  await createServer().connect(transport);
+}

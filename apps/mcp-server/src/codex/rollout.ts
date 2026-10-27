@@ -598,11 +598,11 @@ const SUMMARY_PROMPT = [
   "<transcript>",
 ].join("\n");
 
-export async function summarizeAdhoc(jsonlPath: string, timeoutMs = 60_000): Promise<{ ok: boolean; text: string; reason?: string }> {
+export async function summarizeAdhoc(jsonlPath: string, timeoutMs = 60_000, signal?: AbortSignal): Promise<{ ok: boolean; text: string; reason?: string }> {
   const transcript = await readTranscript({ jsonlPath });
   const prompt = `${SUMMARY_PROMPT}\n${transcript}\n</transcript>`;
   return new Promise(resolve => {
-    const child = spawn("claude", ["-p", "--model", "haiku", prompt], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("claude", ["-p", "--model", "haiku", prompt], { stdio: ["ignore", "pipe", "pipe"], signal });
     let out = "";
     let killed = false;
     const timer = setTimeout(() => { killed = true; child.kill("SIGTERM"); }, timeoutMs);

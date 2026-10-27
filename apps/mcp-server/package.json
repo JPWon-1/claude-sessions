@@ -12,10 +12,14 @@
     "register": "claude mcp add claude-sessions -- tsx $(pwd)/src/server.ts",
     "unregister": "claude mcp remove claude-sessions",
     "register:codex": "claude mcp add --scope user codex-sessions -- $(pwd)/node_modules/.bin/tsx $(pwd)/src/codex-server.ts",
-    "unregister:codex": "claude mcp remove --scope user codex-sessions"
+    "unregister:codex": "claude mcp remove --scope user codex-sessions",
+    "test": "node --import tsx --test src/*.test.ts",
+    "dev:http": "tsx src/http.ts",
+    "install:http": "bash scripts/install-http.sh",
+    "register:http": "claude mcp add --scope user --transport http claude-sessions http://127.0.0.1:18766/claude-sessions/mcp && claude mcp add --scope user --transport http codex-sessions http://127.0.0.1:18766/codex-sessions/mcp"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.0.4"
+    "@modelcontextprotocol/sdk": "1.32.1"
   },
   "devDependencies": {
     "@types/node": "20.16.0",

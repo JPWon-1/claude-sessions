@@ -174,8 +174,10 @@ function windowAroundPattern(line: string, pattern: string, ignoreCase: boolean)
 
 // rg 가 있으면 rg(--json) 으로, 없으면 BSD/GNU grep 으로 자동 폴백.
 // macOS 기본에 rg 가 없는 게 일반적이라 grep 경로가 실용적으로 더 안정.
-export function ripgrep(pattern: string, opts: { workspace?: string; limit?: number; ignoreCase?: boolean } = {}): Promise<RipgrepHit[]> {
+export function ripgrep(pattern: string, opts: { workspace?: string; limit?: number; ignoreCase?: boolean; signal?: AbortSignal } = {}): Promise<RipgrepHit[]> {
   return new Promise<RipgrepHit[]>((resolve) => {
+    // 공유 HTTP 서버에선 클라이언트가 끊으면 MCP 가 signal 을 abort 한다 → 자식 프로세스도 같이 죽인다.
+    if (opts.signal?.aborted) return resolve([]);
     const target = opts.workspace
       ? path.join(PROJECTS_ROOT, opts.workspace)
       : PROJECTS_ROOT;
@@ -184,15 +186,18 @@ export function ripgrep(pattern: string, opts: { workspace?: string; limit?: num
 
     // 1차: rg 시도
     if (ripgrepBinaryAvailable()) {
-      const args = ["--json", "--no-config"];
+      // --no-ignore: ~/.claude 를 git 으로 관리하며 .gitignore 에 projects/** 를 두면 rg 가 전부 건너뛴다.
+      // 그 대신 대상을 직접 좁힌다: 세션 트랜스크립트(*.jsonl)만, 서브에이전트 트랜스크립트는 제외(grep 폴백과 동일).
+      const args = ["--json", "--no-config", "--no-ignore", "-g", "*.jsonl", "-g", "!**/subagents/**"];
       if (ignoreCase) args.push("-i");
       args.push("--max-count", String(limit));
       args.push(pattern, target);
 
-      const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn("rg", args, { stdio: ["ignore", "pipe", "pipe"], signal: opts.signal });
       const hits: RipgrepHit[] = [];
       let buf = "";
       child.stdout.on("data", chunk => {
+        if (hits.length >= limit) return;
         buf += chunk.toString();
         let idx;
         while ((idx = buf.indexOf("\n")) >= 0) {
@@ -209,16 +214,21 @@ export function ripgrep(pattern: string, opts: { workspace?: string; limit?: num
               line_number: obj.data.line_number,
               text: windowAroundBytes(lineText, obj.data.submatches?.[0]?.start),
             });
+            // --max-count 는 파일당 상한이라 전체 상한은 여기서 끊는다(grep 폴백과 동일).
+            if (hits.length >= limit) {
+              child.kill();
+              break;
+            }
           }
         }
       });
-      child.on("close", () => resolve(hits));
-      child.on("error", () => grepFallback(pattern, target, limit, ignoreCase).then(resolve));
+      child.on("close", () => resolve(opts.signal?.aborted ? [] : hits.slice(0, limit)));
+      child.on("error", () => opts.signal?.aborted ? resolve([]) : grepFallback(pattern, target, limit, ignoreCase, opts.signal).then(resolve));
       return;
     }
 
     // 폴백: grep
-    grepFallback(pattern, target, limit, ignoreCase).then(resolve);
+    grepFallback(pattern, target, limit, ignoreCase, opts.signal).then(resolve);
   });
 }
 
@@ -227,13 +237,13 @@ function ripgrepBinaryAvailable(): boolean {
   return r.status === 0;
 }
 
-function grepFallback(pattern: string, target: string, limit: number, ignoreCase: boolean): Promise<RipgrepHit[]> {
+function grepFallback(pattern: string, target: string, limit: number, ignoreCase: boolean, signal?: AbortSignal): Promise<RipgrepHit[]> {
   return new Promise<RipgrepHit[]>((resolve) => {
-    const args = ["-rIEn", "--include=*.jsonl"];
+    const args = ["-rIEn", "--include=*.jsonl", "--exclude-dir=subagents"];
     if (ignoreCase) args.push("-i");
     args.push(`--max-count=${limit}`);
     args.push("-e", pattern, target);
-    const child = spawn("grep", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("grep", args, { stdio: ["ignore", "pipe", "pipe"], signal });
     const hits: RipgrepHit[] = [];
     let buf = "";
     child.stdout.on("data", chunk => {
@@ -362,11 +372,11 @@ const SUMMARY_PROMPT = [
   "<transcript>",
 ].join("\n");
 
-export async function summarizeAdhoc(jsonlPath: string, timeoutMs = 60_000): Promise<{ ok: boolean; text: string; reason?: string }> {
+export async function summarizeAdhoc(jsonlPath: string, timeoutMs = 60_000, signal?: AbortSignal): Promise<{ ok: boolean; text: string; reason?: string }> {
   const transcript = await readTranscript({ jsonlPath });
   const prompt = `${SUMMARY_PROMPT}\n${transcript}\n</transcript>`;
   return new Promise(resolve => {
-    const child = spawn("claude", ["-p", "--model", "haiku", prompt], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("claude", ["-p", "--model", "haiku", prompt], { stdio: ["ignore", "pipe", "pipe"], signal });
     let out = "", err = "";
     let killed = false;
     const timer = setTimeout(() => { killed = true; child.kill("SIGTERM"); }, timeoutMs);
